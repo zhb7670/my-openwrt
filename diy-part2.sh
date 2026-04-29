@@ -42,6 +42,7 @@ rm -rf feeds/luci/applications/luci-app-passwall
 echo ">>> 移除 autosamba（与 samba4 文件冲突）..."
 rm -rf feeds/packages/net/autosamba 2>/dev/null || true
 rm -rf package/lean/autosamba       2>/dev/null || true
+rm -rf package/lean/ddns-scripts_dnspod 2>/dev/null || true
 
 # ── 3. 强制重新安装所有 feeds（让新版本建立软链接）──
 echo ">>> 全量重新安装 feeds..."
