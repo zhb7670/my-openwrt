@@ -1,0 +1,169 @@
+name: Build OpenWrt x86-64
+
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: '是否开启 SSH 调试（不需要选 false）'
+        required: false
+        default: 'false'
+  # 推送到 main 分支自动触发
+  push:
+    branches:
+      - main
+    paths:
+      - '.config'
+      - 'feeds.conf.default'
+      - 'diy-part1.sh'
+      - 'diy-part2.sh'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+    - name: 检出仓库
+      uses: actions/checkout@v4
+
+    - name: 初始化编译环境
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install -y \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib \
+          g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev \
+          libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev \
+          libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs \
+          msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools \
+          python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
+          uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: 释放磁盘空间
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+        docker rmi $(docker images -q) 2>/dev/null || true
+        df -hT
+
+    - name: 克隆 LEDE 源码
+      working-directory: /workdir
+      run: |
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: 复制自定义 feeds 配置
+      run: |
+        [ -f $FEEDS_CONF ] && cp $FEEDS_CONF /workdir/openwrt/feeds.conf.default
+
+    - name: 执行 diy-part1.sh（更新 golang，feeds update 之前）
+      run: |
+        chmod +x $DIY_P1_SH
+        cd /workdir/openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: 更新并安装 feeds
+      run: |
+        cd /workdir/openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: 执行 diy-part2.sh（清除冲突旧包，修改默认配置）
+      run: |
+        chmod +x $DIY_P2_SH
+        cd /workdir/openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: 复制 .config 并补全
+      run: |
+        [ -f $CONFIG_FILE ] && cp $CONFIG_FILE /workdir/openwrt/.config
+        cd /workdir/openwrt
+        make defconfig
+
+    - name: SSH 连接调试（可选）
+      uses: P3TERX/ssh2actions@main
+      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+      env:
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+    - name: 下载编译依赖包
+      run: |
+        cd /workdir/openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: 编译固件
+      id: compile
+      run: |
+        cd /workdir/openwrt
+        echo -e "$(nproc) 线程编译"
+        make -j$(nproc) || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: 检查磁盘空间
+      if: (!cancelled())
+      run: df -hT
+
+    - name: 整理固件文件
+      id: organize
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd /workdir/openwrt/bin/targets/*/*
+        # 删除无关文件，只保留镜像和包
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件到 Artifacts
+      uses: actions/upload-artifact@v4
+      if: steps.organize.outputs.status == 'success'
+      with:
+        name: OpenWrt_x86-64${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: 上传固件到 Release
+      uses: softprops/action-gh-release@v2
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
+      with:
+        tag_name: ${{ env.FILE_DATE }}
+        name: OpenWrt x86-64 ${{ env.FILE_DATE }}
+        body: |
+          ## OpenWrt x86/64 固件
+          **基于：** coolsnowwolf/lede
+          **编译时间：** ${{ env.FILE_DATE }}
+
+          ### 包含插件
+          - PassWall2 + PassWall（支持 SS/SSR/V2Ray/VLESS/Trojan/Hysteria2/TUIC/Reality/WireGuard）
+          - SSR-Plus+
+          - OpenClash（Clash.Meta/Mihomo）
+          - SmartDNS + MosDNS v5 + AdGuard Home
+          - DDNS-Go（60+ 服务商）
+          - iStore 应用商店
+          - Docker
+          - Argon 主题
+        files: ${{ env.FIRMWARE }}/*
+        token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,33 @@
+# ============================================================
+# feeds.conf.default — OpenWrt x86/64 全功能固件
+# 基于 coolsnowwolf/lede，所有仓库地址已于 2025-04 核实
+#
+# 注意：feed 名称只能用字母、数字、下划线，不能含连字符(-)
+# ============================================================
+
+# ── LEDE 官方三源（必须保留，顺序不能变）──
+src-git packages https://github.com/coolsnowwolf/packages
+src-git luci https://github.com/coolsnowwolf/luci
+src-git routing https://github.com/coolsnowwolf/routing
+src-git telephony https://git.openwrt.org/feed/telephony.git
+
+# ── PassWall（已迁移至 Openwrt-Passwall org，2025-04 核实）──
+# 必须写在 packages/luci 之后，以便覆盖旧版依赖
+src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main
+src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main
+src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main
+
+# ── SSR-Plus+（fw876）──
+src-git helloworld https://github.com/fw876/helloworld.git
+
+# ── OpenClash（vernesong，dev 分支）──
+src-git openclash https://github.com/vernesong/OpenClash.git;dev
+
+# ── kenzok8 整合包（含 iStore、AdGuardHome、SmartDNS、ddns-go、Argon 等）──
+# kenzok8/small 包含 mihomo/sing-box/homeproxy/mosdns 依赖
+# ddns-go、mosdns 均通过 kenzo+small 提供，无需单独加 feed
+src-git kenzo https://github.com/kenzok8/openwrt-packages.git
+src-git small https://github.com/kenzok8/small.git
+
+# ── iStore 应用商店 ──
+src-git istore https://github.com/linkease/istore.git;main
