@@ -1,0 +1,172 @@
+name: Build ImmortalWrt x86/64
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+      - 'docs/**'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      clean_cache:
+        description: '清理 ccache 缓存'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
+  REPO_BRANCH: openwrt-24.10
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: 检查项目
+        uses: actions/checkout@main
+
+      - name: 初始化环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android/sdk /opt/ghc
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2204)
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "$TZ"
+          sudo mkdir -p /workdir
+          sudo chown $USER:$GROUPS /workdir
+
+      - name: 克隆源码
+        working-directory: /workdir
+        run: |
+          df -hT $PWD
+          git clone $REPO_URL -b $REPO_BRANCH openwrt
+          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+      - name: 加载自定义 feeds
+        run: |
+          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+          chmod +x $DIY_P1_SH
+          cd openwrt
+          $GITHUB_WORKSPACE/$DIY_P1_SH
+
+      - name: 更新 & 安装 feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 加载自定义配置
+        run: |
+          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+          chmod +x $DIY_P2_SH
+          cd openwrt
+          $GITHUB_WORKSPACE/$DIY_P2_SH
+
+      - name: 下载软件包
+        id: package
+        run: |
+          cd openwrt
+          make defconfig
+          make download -j$(nproc)
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: 编译固件
+        id: compile
+        run: |
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          make -j$(nproc) || make -j1 || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 检查空间使用情况
+        if: always()
+        run: df -hT
+
+      - name: 整理固件
+        id: organize
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt
+          mkdir -p release/firmware
+          rm -rf $(find bin/targets/ -type d -name "packages")
+          cp -rf bin/targets/*/*/*.img.gz release/firmware/ 2>/dev/null || true
+          cp -rf bin/targets/*/*/*.iso release/firmware/ 2>/dev/null || true
+          cp -rf bin/targets/*/*/*.vdi release/firmware/ 2>/dev/null || true
+          cp -rf bin/targets/*/*/*.vmdk release/firmware/ 2>/dev/null || true
+          cp -rf bin/targets/*/*/*.qcow2 release/firmware/ 2>/dev/null || true
+          cp -rf bin/targets/*/*/*.efi release/firmware/ 2>/dev/null || true
+          cd release/firmware
+          ls -lh
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 上传固件到 Artifacts
+        if: steps.organize.outputs.status == 'success'
+        uses: actions/upload-artifact@main
+        with:
+          name: ImmortalWrt_x86_64_firmware
+          path: ${{ env.FIRMWARE }}
+
+      - name: 生成发布标签
+        if: steps.organize.outputs.status == 'success'
+        id: tag
+        run: |
+          echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+          touch release.txt
+          echo "## 🌟 固件信息" >> release.txt
+          echo "**编译时间**: $(date +"%Y-%m-%d %H:%M:%S")" >> release.txt
+          echo "**源码版本**: ImmortalWrt $REPO_BRANCH" >> release.txt
+          echo "**目标平台**: x86/64" >> release.txt
+          echo "" >> release.txt
+          echo "## 📦 固件文件" >> release.txt
+          echo "| 文件名 | 大小 |" >> release.txt
+          echo "|--------|------|" >> release.txt
+          cd $FIRMWARE
+          for f in *; do
+            [ -f "$f" ] && echo "| $f | $(du -h "$f" | cut -f1) |" >> $GITHUB_WORKSPACE/release.txt
+          done
+          echo "" >> release.txt
+          echo "## ⚠️ 注意事项" >> release.txt
+          echo "- 默认 IP: 192.168.1.1" >> release.txt
+          echo "- 默认用户名: root" >> release.txt
+          echo "- 默认密码: 无" >> release.txt
+
+      - name: 发布到 Releases
+        if: steps.organize.outputs.status == 'success'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: "ImmortalWrt x86/64 ${{ steps.tag.outputs.release_tag }}"
+          body_path: release.txt
+          draft: false
+          prerelease: false
+          files: ${{ env.FIRMWARE }}/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 编译失败通知
+        if: failure()
+        run: |
+          echo "::error::编译失败，请检查日志"
+          cd openwrt
+          tail -100 make.log 2>/dev/null || true
